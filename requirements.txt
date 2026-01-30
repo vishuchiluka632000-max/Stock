@@ -3,8 +3,8 @@ yfinance
 pandas
 numpy
 plotly
-feedparser
-newspaper3k
 requests
+feedparser
+beautifulsoup4
 scikit-learn
 openpyxl

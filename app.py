@@ -94,6 +94,44 @@ with t2:
 with t3:
     st.dataframe(cashflow_df)
 
+# ---------------- UPLOAD SCREENER FS (AUTO ANALYSIS) ----------------
+st.subheader("📂 Upload Financial Statement (from Screener)")
+
+uploaded = st.file_uploader("Upload CSV or Excel downloaded from Screener", type=["csv","xlsx"])
+
+if uploaded:
+    try:
+        if uploaded.name.endswith("csv"):
+            fs = pd.read_csv(uploaded)
+        else:
+            fs = pd.read_excel(uploaded)
+
+        st.success("File loaded successfully")
+        st.dataframe(fs)
+
+        numeric_cols = fs.select_dtypes(include=np.number)
+
+        if not numeric_cols.empty:
+            st.subheader("📊 Auto Financial Analysis")
+
+            total_revenue = numeric_cols.iloc[0].sum()
+            net_profit = numeric_cols.iloc[-1].sum()
+
+            profit_margin = (net_profit/total_revenue)*100 if total_revenue else 0
+
+            col1, col2, col3 = st.columns(3)
+            col1.metric("Total Revenue", f"₹{total_revenue:,.0f}")
+            col2.metric("Net Profit", f"₹{net_profit:,.0f}")
+            col3.metric("Profit Margin", f"{profit_margin:.2f}%")
+
+            st.plotly_chart(px.bar(numeric_cols.T, title="Financial Trend"), use_container_width=True)
+
+        else:
+            st.warning("No numeric financial data detected")
+
+    except Exception as e:
+        st.error("Unable to read file. Please upload Screener CSV/Excel format correctly.")
+
 # ---------------- ADVANCED RATIOS ----------------
 def safe(v): return round(v,2) if v else 0
 

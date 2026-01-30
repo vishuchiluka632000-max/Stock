@@ -19,25 +19,39 @@ st.markdown("""
 st.title("📊 Stock Analyzer Pro — Screener Style")
 st.caption("Search by company name like Screener • Full financials • Ratios • Trends")
 
-# ---------------- SMART SEARCH LIKE SCREENER ----------------
-query = st.text_input("🔍 Search company name (ex: Reliance, TCS, Infosys)")
+# ---------------- SMART SEARCH LIKE SCREENER (DROPDOWN AUTOCOMPLETE) ----------------
+st.query_params.clear()
+
+search_text = st.text_input("🔍 Search company name (type like Screener)", placeholder="Start typing: Reliance, SBI, Infosys...")
 
 symbol = None
 company_name = None
 
-if query:
-    results = Search(query, max_results=10).quotes
-    if results:
-        options = {f"{r['shortname']} ({r['symbol']})": r['symbol'] for r in results}
-        selected = st.selectbox("Select company", list(options.keys()))
-        symbol = options[selected]
-        company_name = selected
+if search_text:
+    try:
+        results = Search(search_text, max_results=15).quotes
+        if results:
+            dropdown = {
+                f"{r.get('shortname','')} ({r.get('symbol','')})": r.get('symbol','')
+                for r in results if r.get('symbol')
+            }
+
+            selected = st.selectbox(
+                "Select from results",
+                list(dropdown.keys()),
+                label_visibility="collapsed"
+            )
+
+            symbol = dropdown[selected]
+            company_name = selected
+    except:
+        st.warning("Search temporarily unavailable")
 
 if not symbol:
-    st.info("Start typing company name to search")
     st.stop()
 
 # ---------------- DATA ----------------
+
 def load(symbol):
     s = yf.Ticker(symbol)
     return s.history(period="5y"), s.info, s.financials, s.balance_sheet, s.cashflow
@@ -131,3 +145,4 @@ st.write(f"{score}/100")
 # ---------------- SIMILAR STOCKS ----------------
 st.subheader("🏭 Similar Companies (same sector)")
 st.write(info.get("sector", "Sector data not available"))
+

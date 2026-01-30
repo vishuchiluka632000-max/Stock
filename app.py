@@ -4,28 +4,26 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 from sklearn.linear_model import LinearRegression
-from rapidfuzz import process
 import feedparser
 from datetime import datetime
 
 # ---------------- CONFIG ----------------
 st.set_page_config("Stock Analyzer Pro", layout="wide")
 
-BACKGROUND = """
+st.markdown("""
 <style>
-.stApp {
+.stApp{
 background-image:url("https://images.unsplash.com/photo-1569025690938-a00729c9e1b3");
 background-size:cover;
 background-attachment:fixed;
 }
 .block-container{background:#0e1117;padding:2rem;border-radius:15px}
 </style>
-"""
-st.markdown(BACKGROUND, unsafe_allow_html=True)
+""", unsafe_allow_html=True)
 
 st.title("📊 Stock Analyzer Pro")
 
-# ---------------- STOCK UNIVERSE ----------------
+# ---------------- STOCK LIST ----------------
 stocks = {
     "Reliance Industries":"RELIANCE.NS",
     "Tata Motors":"TATAMOTORS.NS",
@@ -34,43 +32,42 @@ stocks = {
     "HDFC Bank":"HDFCBANK.NS",
     "ICICI Bank":"ICICIBANK.NS",
     "ITC":"ITC.NS",
-    "SBI":"SBIN.NS",
+    "State Bank of India":"SBIN.NS",
     "Bharti Airtel":"BHARTIARTL.NS",
     "Larsen & Toubro":"LT.NS",
     "Asian Paints":"ASIANPAINT.NS",
     "HUL":"HINDUNILVR.NS"
 }
 
-# ---------------- SMART SEARCH ----------------
-company_list = list(stocks.keys())
+names = list(stocks.keys())
+
+# ---------------- SMART SEARCH (NO LIBRARY) ----------------
 query = st.text_input("Search stock name")
 
-suggestions = []
-if query:
-    suggestions = [x[0] for x in process.extract(query, company_list, limit=6)]
+matches = [n for n in names if query.lower() in n.lower()]
 
-if not suggestions:
+if not matches:
     st.stop()
 
-company = st.selectbox("Select company", suggestions)
+company = st.selectbox("Select company", matches)
 symbol = stocks[company]
 
 # ---------------- TIMEFRAME ----------------
-period_map = {
+periods = {
     "1D":"1d","1W":"5d","1M":"1mo","3M":"3mo",
     "6M":"6mo","1Y":"1y","3Y":"3y","5Y":"5y","ALL":"max"
 }
 
-tf = st.radio("Timeframe", list(period_map.keys()), horizontal=True)
+tf = st.radio("Timeframe", list(periods.keys()), horizontal=True)
 
-data = yf.download(symbol, period=period_map[tf], progress=False)
+data = yf.download(symbol, period=periods[tf], progress=False)
 
-# ---------------- CANDLE / LINE SWITCH ----------------
-view = st.radio("Chart Type", ["Candlestick","Line"], horizontal=True)
+# ---------------- CHART SWITCH ----------------
+chart_type = st.radio("Chart Type", ["Candlestick","Line"], horizontal=True)
 
 fig = go.Figure()
 
-if view=="Candlestick":
+if chart_type=="Candlestick":
     fig.add_candlestick(
         x=data.index,
         open=data["Open"],
@@ -87,7 +84,6 @@ st.plotly_chart(fig,use_container_width=True)
 # ---------------- MARKET CAP ----------------
 info = yf.Ticker(symbol).info
 mcap = info.get("marketCap",0)/1e7
-
 st.metric("Market Cap (₹ Cr)", f"{mcap:,.0f}")
 
 # ---------------- FINANCIALS ----------------
@@ -95,86 +91,69 @@ st.subheader("📑 Financial Statements (₹ Cr)")
 
 ticker = yf.Ticker(symbol)
 
-def clean(df):
+def cr(df):
     if df is None: return pd.DataFrame()
     return (df/1e7).round(1)
 
-tab1,tab2,tab3 = st.tabs(["Income Statement","Balance Sheet","Cash Flow"])
+t1,t2,t3 = st.tabs(["Income Statement","Balance Sheet","Cash Flow"])
 
-with tab1: st.dataframe(clean(ticker.financials))
-with tab2: st.dataframe(clean(ticker.balance_sheet))
-with tab3: st.dataframe(clean(ticker.cashflow))
+with t1: st.dataframe(cr(ticker.financials))
+with t2: st.dataframe(cr(ticker.balance_sheet))
+with t3: st.dataframe(cr(ticker.cashflow))
 
 # ---------------- RATIOS ----------------
-def val(x): return round(x,2) if x else 0
+def v(x): return round(x,2) if x else 0
 
 ratios = {
-    "PE":val(info.get("trailingPE")),
-    "ROE %":val(info.get("returnOnEquity",0)*100),
-    "Profit Margin %":val(info.get("profitMargins",0)*100),
-    "Debt/Equity":val(info.get("debtToEquity")),
-    "Current Ratio":val(info.get("currentRatio")),
-    "Revenue Growth %":val(info.get("revenueGrowth",0)*100)
+    "PE Ratio":v(info.get("trailingPE")),
+    "ROE %":v(info.get("returnOnEquity",0)*100),
+    "Profit Margin %":v(info.get("profitMargins",0)*100),
+    "Debt to Equity":v(info.get("debtToEquity")),
+    "Current Ratio":v(info.get("currentRatio")),
+    "Revenue Growth %":v(info.get("revenueGrowth",0)*100)
 }
 
-def grade(name,v):
-    if name=="PE":
-        return "Excellent" if v<20 else "Good" if v<30 else "Bad"
-    if "ROE" in name:
-        return "Excellent" if v>18 else "Good" if v>12 else "Bad"
-    if "Margin" in name:
-        return "Excellent" if v>15 else "Good" if v>8 else "Bad"
-    if "Debt" in name:
-        return "Excellent" if v<0.5 else "Good" if v<1 else "Bad"
+def status(k,v):
+    if "PE" in k: return "Excellent" if v<20 else "Good" if v<30 else "Bad"
+    if "ROE" in k: return "Excellent" if v>18 else "Good" if v>12 else "Bad"
+    if "Margin" in k: return "Excellent" if v>15 else "Good" if v>8 else "Bad"
+    if "Debt" in k: return "Excellent" if v<0.5 else "Good" if v<1 else "Bad"
     return "Good"
 
-ratio_df = pd.DataFrame(
-    [[k,v,grade(k,v)] for k,v in ratios.items()],
-    columns=["Ratio","Value","Status"]
+df_ratios = pd.DataFrame(
+    [[k,v,status(k,v)] for k,v in ratios.items()],
+    columns=["Ratio","Value","Health"]
 )
 
 st.subheader("📊 Financial Ratios")
-st.dataframe(ratio_df)
+st.dataframe(df_ratios)
 
-# ---------------- RATIO SUMMARY ----------------
-good = (ratio_df["Status"]=="Excellent").sum()
-st.info(f"Overall financial strength looks {'Strong' if good>=3 else 'Average'} based on profitability and debt control.")
+score = (df_ratios["Health"]=="Excellent").sum()
+st.info("Overall company looks " + ("Strong" if score>=3 else "Moderate"))
 
 # ---------------- FORECAST ----------------
-st.subheader("📈 Price Projection")
+st.subheader("📈 Future Price Projection")
 
 df = data.reset_index()
-df["t"] = np.arange(len(df))
+df["t"]=np.arange(len(df))
 
-X = df[["t"]]
-y = df["Close"]
+model = LinearRegression().fit(df[["t"]], df["Close"])
 
-model = LinearRegression().fit(X,y)
-
-future_days = st.slider("Days ahead",30,180,90)
-
-future = np.arange(len(df),len(df)+future_days).reshape(-1,1)
+days = st.slider("Projection days",30,180,90)
+future = np.arange(len(df),len(df)+days).reshape(-1,1)
 pred = model.predict(future)
 
-pred_df = pd.DataFrame({"Day":range(future_days),"Price":pred})
-
-st.line_chart(pred_df.set_index("Day"))
+forecast = pd.DataFrame({"Day":range(days),"Price":pred})
+st.line_chart(forecast.set_index("Day"))
 
 # ---------------- NEWS ----------------
 st.subheader("📰 Latest Stock News")
 
-def fetch_news(q):
-    url = f"https://news.google.com/rss/search?q={q}+stock+market"
+def news(q):
+    url = f"https://news.google.com/rss/search?q={q}+stock"
     feed = feedparser.parse(url)
-    news=[]
     for e in feed.entries[:6]:
-        published = datetime(*e.published_parsed[:6])
-        news.append({
-            "title":e.title,
-            "date":published.strftime("%d %b %Y %H:%M"),
-            "link":e.link
-        })
-    return news
+        dt = datetime(*e.published_parsed[:6])
+        st.markdown(f"**{e.title}**  \n🕒 {dt.strftime('%d %b %Y %H:%M')}  \n[Read]({e.link})")
 
-for n in fetch_news(company):
-    st.markdown(f"**{n['title']}**  \n🕒 {n['date']}  \n[Read more]({n['link']})")
+news(company)

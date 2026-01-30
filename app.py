@@ -3,195 +3,198 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
+import requests, feedparser
+from bs4 import BeautifulSoup
 from sklearn.linear_model import LinearRegression
-import feedparser
-import requests
-from newspaper import Article
 
-# ---------------- UI ----------------
 st.set_page_config("Stock Analyzer Pro", layout="wide")
 
-def set_bg():
-    st.markdown(
-        """
-        <style>
-        .stApp {
-            background-image: url("bg.jpg");
-            background-size: cover;
-        }
-        </style>
-        """,
-        unsafe_allow_html=True
-    )
+# ------------------ UI STYLE ------------------
 
-set_bg()
+st.markdown("""
+<style>
+body {background:#0e1117;color:white}
+.card {background:#161b22;padding:18px;border-radius:14px}
+button {border-radius:12px}
+</style>
+""", unsafe_allow_html=True)
 
 st.title("📊 Stock Analyzer Pro")
 
-# ---------------- SEARCH ----------------
-@st.cache_data
-def load_symbols():
-    tickers = yf.Tickers(" ".join([
-        "RELIANCE.NS TCS.NS INFY.NS HDFCBANK.NS ICICIBANK.NS SBIN.NS IEX.NS ITC.NS"
-    ]))
-    return {t.info.get("longName", t): k for k,t in tickers.tickers.items()}
+# ------------------ SMART SEARCH ------------------
 
-symbols = load_symbols()
-company = st.selectbox("Search Company", list(symbols.keys()))
-ticker = symbols[company]
+query = st.text_input("Search stock name or symbol")
 
-# ---------------- TIME RANGE ----------------
+def search_stock(q):
+    if not q:
+        return []
+    url = f"https://query1.finance.yahoo.com/v1/finance/search?q={q}"
+    return requests.get(url).json()["quotes"][:6]
+
+results = search_stock(query)
+
+if results:
+    selected = st.selectbox(
+        "Select company",
+        results,
+        format_func=lambda x: f"{x['shortname']} ({x['symbol']})"
+    )
+    symbol = selected["symbol"]
+else:
+    st.stop()
+
+# ------------------ DATA ------------------
+
+stock = yf.Ticker(symbol)
+df = stock.history(period="max")
+info = stock.info
+
+df.reset_index(inplace=True)
+
+# ------------------ TIMEFRAME ------------------
+
 ranges = {
-    "1D":"1d","1W":"5d","10D":"10d","1M":"1mo",
-    "3M":"3mo","6M":"6mo","9M":"9mo",
-    "1Y":"1y","3Y":"3y","5Y":"5y","ALL":"max"
+    "1D":1, "1W":5, "10D":10,
+    "1M":22,"3M":66,"6M":132,
+    "1Y":252,"3Y":756,"5Y":1260,"ALL":len(df)
 }
 
-cols = st.columns(len(ranges))
-period = "1y"
-for i,(k,v) in enumerate(ranges.items()):
-    if cols[i].button(k):
-        period = v
+choice = st.radio("Time Range", list(ranges.keys()), horizontal=True)
+plot_df = df.tail(ranges[choice])
 
-# ---------------- PRICE DATA ----------------
-data = yf.download(ticker, period=period, interval="1d")
+# ------------------ CANDLE CHART ------------------
 
-# ---------------- CHART MODE ----------------
-mode = st.radio("Chart Type", ["Line","Candlestick + Volume"], horizontal=True)
-
-fig = go.Figure()
-
-if mode=="Line":
-    fig.add_trace(go.Scatter(x=data.index, y=data["Close"], name="Price"))
-else:
-    fig.add_trace(go.Candlestick(
-        x=data.index,
-        open=data["Open"], high=data["High"],
-        low=data["Low"], close=data["Close"]
-    ))
-    fig.add_trace(go.Bar(x=data.index, y=data["Volume"], name="Volume", yaxis="y2"))
+fig = go.Figure(data=[go.Candlestick(
+    x=plot_df["Date"],
+    open=plot_df["Open"],
+    high=plot_df["High"],
+    low=plot_df["Low"],
+    close=plot_df["Close"]
+)])
 
 fig.update_layout(
-    yaxis2=dict(overlaying="y", side="right", showgrid=False),
-    height=600,
-    template="plotly_dark"
+    template="plotly_dark",
+    title=f"{info.get('shortName')} Price Chart",
+    height=520
 )
 
 st.plotly_chart(fig, use_container_width=True)
 
-# ---------------- MARKET CAP ----------------
-info = yf.Ticker(ticker).info
-mcap = info.get("marketCap",0)/1e7
-st.markdown(f"### Market Cap: ₹ {mcap:,.0f} Cr")
+st.markdown(
+    f"### Market Cap: ₹{round(info.get('marketCap',0)/1e7,2)} Cr"
+)
 
-# ---------------- FINANCIALS ----------------
+# ------------------ FINANCIAL STATEMENTS ------------------
+
+def format_cr(df):
+    return df.applymap(lambda x: f"{x/1e7:.2f} Cr" if pd.notna(x) else "")
+
 st.subheader("📑 Financial Statements")
 
-fs = yf.Ticker(ticker)
-tabs = st.tabs(["Income Statement","Balance Sheet","Cash Flow"])
+tab1,tab2,tab3 = st.tabs(["Income","Balance Sheet","Cash Flow"])
 
-for tab,df in zip(tabs,[fs.financials,fs.balance_sheet,fs.cashflow]):
-    with tab:
-        if df is not None:
-            short = df/1e7
-            st.dataframe(short.round(2))
+with tab1:
+    st.dataframe(format_cr(stock.financials))
+with tab2:
+    st.dataframe(format_cr(stock.balance_sheet))
+with tab3:
+    st.dataframe(format_cr(stock.cashflow))
 
-# ---------------- RATIOS ----------------
-def grade(val, good, ok):
-    if val>=good: return "Excellent"
-    if val>=ok: return "Good"
-    return "Bad"
+# ------------------ RATIOS ------------------
 
 ratios = {
-    "PE": info.get("trailingPE",0),
+    "PE Ratio": info.get("trailingPE"),
+    "PB Ratio": info.get("priceToBook"),
     "ROE %": info.get("returnOnEquity",0)*100,
-    "ROCE %": info.get("returnOnAssets",0)*100,
     "Profit Margin %": info.get("profitMargins",0)*100,
-    "Debt/Equity": info.get("debtToEquity",0),
-    "Current Ratio": info.get("currentRatio",0)
+    "Debt to Equity": info.get("debtToEquity"),
+    "Current Ratio": info.get("currentRatio"),
+    "Revenue Growth %": info.get("revenueGrowth",0)*100
 }
 
-rows=[]
-for k,v in ratios.items():
-    if "RO" in k or "Margin" in k:
-        status = grade(v,15,8)
-    elif "PE" in k:
-        status = grade(30-v,10,0)
-    else:
-        status = grade(2-v,0.5,0)
+def grade(val, good, bad):
+    if val is None: return "N/A"
+    if val >= good: return "Excellent"
+    if val >= bad: return "Good"
+    return "Bad"
 
-    rows.append([k,round(v,2),status])
+rows = []
 
-ratio_df = pd.DataFrame(rows, columns=["Ratio","Value","Health"])
+rows.append(["PE Ratio", ratios["PE Ratio"], grade(ratios["PE Ratio"],25,15)])
+rows.append(["PB Ratio", ratios["PB Ratio"], grade(ratios["PB Ratio"],5,2)])
+rows.append(["ROE %", ratios["ROE %"], grade(ratios["ROE %"],18,12)])
+rows.append(["Profit Margin %", ratios["Profit Margin %"], grade(ratios["Profit Margin %"],15,8)])
+rows.append(["Debt to Equity", ratios["Debt to Equity"], grade(1-ratios["Debt to Equity"] if ratios["Debt to Equity"] else 0,0.6,0.3)])
+rows.append(["Current Ratio", ratios["Current Ratio"], grade(ratios["Current Ratio"],2,1)])
+rows.append(["Revenue Growth %", ratios["Revenue Growth %"], grade(ratios["Revenue Growth %"],15,8)])
+
+ratio_df = pd.DataFrame(rows, columns=["Metric","Value","Status"])
+
 st.subheader("📊 Financial Ratios")
-st.dataframe(ratio_df)
+st.table(ratio_df)
 
-good = ratio_df["Health"].value_counts().to_dict()
-st.info(f"Summary: {good}")
+good = ratio_df["Status"].value_counts().get("Excellent",0)
+st.info(f"Summary: {good} strong metrics out of {len(ratio_df)} — overall {'Strong' if good>=4 else 'Average'} company fundamentals.")
 
-# ---------------- FORECAST ----------------
-st.subheader("📈 Future Projection")
+# ------------------ PRICE FORECAST ------------------
 
-f_range = st.radio("Projection Range",["3M","6M","1Y"],horizontal=True)
-days = {"3M":90,"6M":180,"1Y":365}[f_range]
+st.subheader("📈 Price Projection")
 
-reset = data.reset_index()
-reset["t"]=np.arange(len(reset))
-model = LinearRegression().fit(reset[["t"]],reset["Close"])
+df["t"]=range(len(df))
+X=df[["t"]]
+y=df["Close"]
 
-future = np.arange(len(reset),len(reset)+days).reshape(-1,1)
-pred = model.predict(future)
+model=LinearRegression().fit(X,y)
 
-pf = pd.DataFrame({"Day":range(days),"Forecast":pred})
+future_t=np.arange(len(df),len(df)+180).reshape(-1,1)
+pred=model.predict(future_t)
 
-st.line_chart(pf.set_index("Day"))
+forecast=pd.DataFrame({"Day":range(180),"Price":pred})
 
-# ---------------- UPLOAD FS ----------------
-st.subheader("📂 Upload Screener Financial File")
+st.line_chart(forecast.set_index("Day"))
 
-file = st.file_uploader("Upload Excel/CSV")
-if file:
-    df = pd.read_excel(file) if file.name.endswith("xlsx") else pd.read_csv(file)
-    st.dataframe(df)
+# ------------------ NEWS ------------------
 
-# ---------------- SIMILAR STOCKS ----------------
-sector = info.get("sector","")
-st.subheader("🏭 Similar Sector Companies")
-st.write(sector)
+st.subheader("📰 Stock News")
 
-# ---------------- NEWS ----------------
 def fetch_news(q):
-    feeds=[
-        f"https://news.google.com/rss/search?q={q}+india+stock",
-        f"https://news.google.com/rss/search?q={q}+global+stock"
-    ]
-    articles=[]
-    for url in feeds:
-        feed=feedparser.parse(url)
-        for e in feed.entries[:4]:
+    feeds={
+        "Indian":f"https://news.google.com/rss/search?q={q}+india+stock",
+        "Global":f"https://news.google.com/rss/search?q={q}+stock+market"
+    }
+
+    data={}
+
+    for k,u in feeds.items():
+        f=feedparser.parse(u)
+        items=[]
+        for e in f.entries[:4]:
             try:
-                art=Article(e.link)
-                art.download(); art.parse()
-                articles.append({
+                r=requests.get(e.link,timeout=5)
+                soup=BeautifulSoup(r.text,"html.parser")
+                text=" ".join(p.text for p in soup.find_all("p")[:6])
+                img=soup.find("img")
+                items.append({
                     "title":e.title,
                     "date":e.published,
-                    "summary":art.text[:300],
-                    "image":art.top_image,
+                    "summary":text[:280],
+                    "img":img["src"] if img else None,
                     "link":e.link
                 })
             except:
                 pass
-    return articles
+        data[k]=items
+    return data
 
-st.subheader("📰 Latest News")
+news=fetch_news(info.get("shortName"))
 
-news = fetch_news(company)
-
-for n in news:
-    if n["image"]:
-        st.image(n["image"], width=300)
-    st.markdown(f"**{n['title']}**")
-    st.caption(n["date"])
-    st.write(n["summary"]+"...")
-    st.markdown(f"[Read more]({n['link']})")
-    st.divider()
+for region,articles in news.items():
+    st.markdown(f"## {region} News")
+    for n in articles:
+        if n["img"]:
+            st.image(n["img"],width=280)
+        st.markdown(f"**{n['title']}**")
+        st.caption(n["date"])
+        st.write(n["summary"]+"...")
+        st.markdown(f"[Read full story]({n['link']})")
+        st.divider()

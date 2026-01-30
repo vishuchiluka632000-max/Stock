@@ -1,176 +1,197 @@
 import streamlit as st
 import yfinance as yf
-from yfinance import Search
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 from sklearn.linear_model import LinearRegression
 import feedparser
+import requests
+from newspaper import Article
 
-# ================= PAGE & BACKGROUND =================
-st.set_page_config(page_title="Stock Analyzer Pro", layout="wide")
+# ---------------- UI ----------------
+st.set_page_config("Stock Analyzer Pro", layout="wide")
 
-BACKGROUND = "https://images.unsplash.com/photo-1640158616004-3c8fbb3bde43?auto=format&fit=crop&w=1600&q=80"
+def set_bg():
+    st.markdown(
+        """
+        <style>
+        .stApp {
+            background-image: url("bg.jpg");
+            background-size: cover;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True
+    )
 
-st.markdown(f"""
-<style>
-.stApp {{
-    background-image: url('{BACKGROUND}');
-    background-size: cover;
-    background-attachment: fixed;
-}}
-.block-container {{
-    background: rgba(14,17,23,0.92);
-    padding: 2rem;
-    border-radius: 20px;
-}}
-</style>
-""", unsafe_allow_html=True)
+set_bg()
 
 st.title("📊 Stock Analyzer Pro")
-st.caption("Screener + TradingView + News + Beginner Insights")
 
-# ================= SMART SEARCH =================
-query = st.text_input("🔍 Search company name", placeholder="Reliance, TCS, Infosys, Apple...")
+# ---------------- SEARCH ----------------
+@st.cache_data
+def load_symbols():
+    tickers = yf.Tickers(" ".join([
+        "RELIANCE.NS TCS.NS INFY.NS HDFCBANK.NS ICICIBANK.NS SBIN.NS IEX.NS ITC.NS"
+    ]))
+    return {t.info.get("longName", t): k for k,t in tickers.tickers.items()}
 
-symbol = None
-company = None
+symbols = load_symbols()
+company = st.selectbox("Search Company", list(symbols.keys()))
+ticker = symbols[company]
 
-if query:
-    results = Search(query, max_results=15).quotes
-    if results:
-        options = {f"{r.get('shortname')} ({r.get('symbol')})": r.get('symbol') for r in results if r.get('symbol')}
-        selected = st.selectbox("Select company", list(options.keys()))
-        symbol = options[selected]
-        company = selected.split("(")[0].strip()
+# ---------------- TIME RANGE ----------------
+ranges = {
+    "1D":"1d","1W":"5d","10D":"10d","1M":"1mo",
+    "3M":"3mo","6M":"6mo","9M":"9mo",
+    "1Y":"1y","3Y":"3y","5Y":"5y","ALL":"max"
+}
 
-if not symbol:
-    st.stop()
-
-# ================= LOAD DATA =================
-def load(sym):
-    s = yf.Ticker(sym)
-    return s.history(period="max"), s.info, s.financials, s.balance_sheet, s.cashflow
-
-price, info, income, balance, cashflow = load(symbol)
-
-if price.empty:
-    st.error("No price data available")
-    st.stop()
-
-# ================= TIME RANGE =================
-periods = {"1D":1,"1W":7,"10D":10,"1M":30,"3M":90,"6M":180,"9M":270,"1Y":365,"3Y":1095,"5Y":1825,"ALL":None}
-cols = st.columns(len(periods))
-selected = "ALL"
-
-for i,k in enumerate(periods):
+cols = st.columns(len(ranges))
+period = "1y"
+for i,(k,v) in enumerate(ranges.items()):
     if cols[i].button(k):
-        selected = k
+        period = v
 
-if selected != "ALL":
-    price_f = price.tail(periods[selected])
+# ---------------- PRICE DATA ----------------
+data = yf.download(ticker, period=period, interval="1d")
+
+# ---------------- CHART MODE ----------------
+mode = st.radio("Chart Type", ["Line","Candlestick + Volume"], horizontal=True)
+
+fig = go.Figure()
+
+if mode=="Line":
+    fig.add_trace(go.Scatter(x=data.index, y=data["Close"], name="Price"))
 else:
-    price_f = price
+    fig.add_trace(go.Candlestick(
+        x=data.index,
+        open=data["Open"], high=data["High"],
+        low=data["Low"], close=data["Close"]
+    ))
+    fig.add_trace(go.Bar(x=data.index, y=data["Volume"], name="Volume", yaxis="y2"))
 
-# ================= CANDLESTICK =================
-fig = go.Figure(data=[go.Candlestick(
-    x=price_f.index,
-    open=price_f['Open'],
-    high=price_f['High'],
-    low=price_f['Low'],
-    close=price_f['Close']
-)])
-
-market_cap_cr = info.get('marketCap',0)/1e7
-fig.add_annotation(text=f"Market Cap: ₹{market_cap_cr:,.0f} Cr",xref="paper",yref="paper",x=1,y=1.15,showarrow=False)
-fig.update_layout(title=f"{company} Price Chart", xaxis_rangeslider_visible=False)
-st.plotly_chart(fig, use_container_width=True)
-
-# ================= FINANCIAL STATEMENTS =================
-st.subheader("📑 Financial Statements (₹ Crores)")
-fmt = lambda x: f"{x/1e7:,.2f}" if pd.notnull(x) else ""
-
-t1,t2,t3 = st.tabs(["Income Statement","Balance Sheet","Cash Flow"])
-with t1: st.dataframe(income.applymap(fmt))
-with t2: st.dataframe(balance.applymap(fmt))
-with t3: st.dataframe(cashflow.applymap(fmt))
-
-# ================= RATIOS WITH STATUS =================
-def grade(val, good, excellent):
-    if val >= excellent: return "Excellent"
-    if val >= good: return "Good"
-    return "Bad"
-
-roe = info.get('returnOnEquity',0)*100
-margin = info.get('profitMargins',0)*100
-debt = info.get('debtToEquity',0)
-pe = info.get('trailingPE',0)
-
-ratios = pd.DataFrame({
-    "Ratio": ["PE Ratio","ROE %","Net Profit Margin %","Debt to Equity"],
-    "Value": [round(pe,2),round(roe,2),round(margin,2),round(debt,2)],
-    "Status": [
-        grade(25-pe,5,10),
-        grade(roe,12,18),
-        grade(margin,10,20),
-        grade(2-debt,0.5,1)
-    ]
-})
-
-st.subheader("📊 Financial Ratios")
-st.table(ratios)
-
-st.info(
-    f"ROE of {roe:.2f}% shows profitability. Profit margin {margin:.2f}% reflects efficiency. "
-    f"Debt to equity {debt:.2f} indicates risk. Overall financial quality appears "
-    f"{'strong' if roe>15 and debt<1 else 'moderate' if roe>8 else 'weak'}."
+fig.update_layout(
+    yaxis2=dict(overlaying="y", side="right", showgrid=False),
+    height=600,
+    template="plotly_dark"
 )
 
-# ================= NEWS =================
-st.subheader("📰 Latest News")
+st.plotly_chart(fig, use_container_width=True)
 
-st.markdown("### 🇮🇳 Indian News")
-indian_feeds = [
-    "https://indianexpress.com/section/business/feed/",
-    "https://timesofindia.indiatimes.com/rssfeeds/1898055.cms",
-    "https://www.indiatoday.in/rss/1206514"
-]
+# ---------------- MARKET CAP ----------------
+info = yf.Ticker(ticker).info
+mcap = info.get("marketCap",0)/1e7
+st.markdown(f"### Market Cap: ₹ {mcap:,.0f} Cr")
 
-for url in indian_feeds:
-    feed = feedparser.parse(url)
-    for e in feed.entries[:2]:
-        st.markdown(f"**{e.title}**")
-        st.caption(e.get('published',''))
-        st.write(e.get('summary','')[:150] + "...")
-        st.caption(e.link)
+# ---------------- FINANCIALS ----------------
+st.subheader("📑 Financial Statements")
 
-st.markdown("### 🌍 Global News")
+fs = yf.Ticker(ticker)
+tabs = st.tabs(["Income Statement","Balance Sheet","Cash Flow"])
 
-global_feeds = [
-    "https://www.reuters.com/rssFeed/businessNews",
-    "https://feeds.a.dj.com/rss/RSSMarketsMain.xml"
-]
+for tab,df in zip(tabs,[fs.financials,fs.balance_sheet,fs.cashflow]):
+    with tab:
+        if df is not None:
+            short = df/1e7
+            st.dataframe(short.round(2))
 
-for url in global_feeds:
-    feed = feedparser.parse(url)
-    for e in feed.entries[:2]:
-        st.markdown(f"**{e.title}**")
-        st.caption(e.get('published',''))
-        st.write(e.get('summary','')[:150] + "...")
-        st.caption(e.link)
+# ---------------- RATIOS ----------------
+def grade(val, good, ok):
+    if val>=good: return "Excellent"
+    if val>=ok: return "Good"
+    return "Bad"
 
-# ================= SIMPLE FORECAST =================
-reset = price_f.reset_index()
-reset['t'] = np.arange(len(reset))
-X = reset[['t']]
-y = reset['Close']
+ratios = {
+    "PE": info.get("trailingPE",0),
+    "ROE %": info.get("returnOnEquity",0)*100,
+    "ROCE %": info.get("returnOnAssets",0)*100,
+    "Profit Margin %": info.get("profitMargins",0)*100,
+    "Debt/Equity": info.get("debtToEquity",0),
+    "Current Ratio": info.get("currentRatio",0)
+}
 
-model = LinearRegression().fit(X,y)
-future = np.arange(len(reset), len(reset)+180).reshape(-1,1)
+rows=[]
+for k,v in ratios.items():
+    if "RO" in k or "Margin" in k:
+        status = grade(v,15,8)
+    elif "PE" in k:
+        status = grade(30-v,10,0)
+    else:
+        status = grade(2-v,0.5,0)
+
+    rows.append([k,round(v,2),status])
+
+ratio_df = pd.DataFrame(rows, columns=["Ratio","Value","Health"])
+st.subheader("📊 Financial Ratios")
+st.dataframe(ratio_df)
+
+good = ratio_df["Health"].value_counts().to_dict()
+st.info(f"Summary: {good}")
+
+# ---------------- FORECAST ----------------
+st.subheader("📈 Future Projection")
+
+f_range = st.radio("Projection Range",["3M","6M","1Y"],horizontal=True)
+days = {"3M":90,"6M":180,"1Y":365}[f_range]
+
+reset = data.reset_index()
+reset["t"]=np.arange(len(reset))
+model = LinearRegression().fit(reset[["t"]],reset["Close"])
+
+future = np.arange(len(reset),len(reset)+days).reshape(-1,1)
 pred = model.predict(future)
 
-forecast_df = pd.DataFrame({"Day":range(180),"Predicted Price":pred})
-fig2 = go.Figure()
-fig2.add_trace(go.Scatter(x=forecast_df['Day'], y=forecast_df['Predicted Price']))
-fig2.update_layout(title="6 Month Price Projection")
-st.plotly_chart(fig2, use_container_width=True)
+pf = pd.DataFrame({"Day":range(days),"Forecast":pred})
+
+st.line_chart(pf.set_index("Day"))
+
+# ---------------- UPLOAD FS ----------------
+st.subheader("📂 Upload Screener Financial File")
+
+file = st.file_uploader("Upload Excel/CSV")
+if file:
+    df = pd.read_excel(file) if file.name.endswith("xlsx") else pd.read_csv(file)
+    st.dataframe(df)
+
+# ---------------- SIMILAR STOCKS ----------------
+sector = info.get("sector","")
+st.subheader("🏭 Similar Sector Companies")
+st.write(sector)
+
+# ---------------- NEWS ----------------
+def fetch_news(q):
+    feeds=[
+        f"https://news.google.com/rss/search?q={q}+india+stock",
+        f"https://news.google.com/rss/search?q={q}+global+stock"
+    ]
+    articles=[]
+    for url in feeds:
+        feed=feedparser.parse(url)
+        for e in feed.entries[:4]:
+            try:
+                art=Article(e.link)
+                art.download(); art.parse()
+                articles.append({
+                    "title":e.title,
+                    "date":e.published,
+                    "summary":art.text[:300],
+                    "image":art.top_image,
+                    "link":e.link
+                })
+            except:
+                pass
+    return articles
+
+st.subheader("📰 Latest News")
+
+news = fetch_news(company)
+
+for n in news:
+    if n["image"]:
+        st.image(n["image"], width=300)
+    st.markdown(f"**{n['title']}**")
+    st.caption(n["date"])
+    st.write(n["summary"]+"...")
+    st.markdown(f"[Read more]({n['link']})")
+    st.divider()

@@ -5,6 +5,8 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 from sklearn.linear_model import LinearRegression
+import feedparser
+from datetime import timedelta
 
 # ---------------- PAGE STYLE ----------------
 st.set_page_config(page_title="Stock Analyzer Pro", layout="wide")
@@ -18,9 +20,9 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.title("📊 Stock Analyzer Pro — Full Fundamental Platform")
-st.caption("Screener + TradingView style analysis for beginners & pros")
+st.caption("Screener + TradingView style analysis for Indian & global stocks")
 
-# ---------------- SMART SEARCH ----------------
+# ---------------- SMART SEARCH (NAME MATCH FIXED) ----------------
 query = st.text_input("🔍 Search company name", placeholder="Type: Reliance, TCS, Infosys...")
 
 symbol = None
@@ -29,10 +31,10 @@ company = None
 if query:
     results = Search(query, max_results=15).quotes
     if results:
-        options = {f"{r.get('shortname','')} ({r.get('symbol','')})": r.get('symbol') for r in results if r.get('symbol')}
+        options = {f"{r.get('shortname')} ({r.get('symbol')})": r.get('symbol') for r in results if r.get('symbol')}
         selected = st.selectbox("Select company", list(options.keys()))
         symbol = options[selected]
-        company = selected
+        company = selected.split("(")[0].strip()
 
 if not symbol:
     st.stop()
@@ -40,7 +42,7 @@ if not symbol:
 # ---------------- DATA ----------------
 def load(sym):
     s = yf.Ticker(sym)
-    return s.history(period="5y"), s.info, s.financials, s.balance_sheet, s.cashflow
+    return s.history(period="max"), s.info, s.financials, s.balance_sheet, s.cashflow
 
 price, info, income, balance, cashflow = load(symbol)
 
@@ -48,92 +50,83 @@ if price.empty:
     st.error("No data available")
     st.stop()
 
-# ---------------- NUMBER FORMAT ----------------
-def fmt(x):
+# ---------------- HELPERS ----------------
+def to_crore(x):
     try:
-        return f"₹{x:,.0f}"
+        return f"₹{x/1e7:,.2f} Cr"
     except:
-        return x
+        return ""
+
+# ---------------- TIME RANGE SELECTOR ----------------
+periods = {
+    "1D":1,
+    "1W":7,
+    "10D":10,
+    "1M":30,
+    "3M":90,
+    "6M":180,
+    "9M":270,
+    "1Y":365,
+    "3Y":1095,
+    "5Y":1825,
+    "ALL":None
+}
+
+cols = st.columns(len(periods))
+selected_period = "ALL"
+
+for i,(k,v) in enumerate(periods.items()):
+    if cols[i].button(k): selected_period = k
+
+if selected_period != "ALL":
+    days = periods[selected_period]
+    price_filtered = price.tail(days)
+else:
+    price_filtered = price
 
 # ---------------- CANDLESTICK CHART ----------------
 fig = go.Figure(data=[go.Candlestick(
-    x=price.index,
-    open=price['Open'],
-    high=price['High'],
-    low=price['Low'],
-    close=price['Close']
+    x=price_filtered.index,
+    open=price_filtered['Open'],
+    high=price_filtered['High'],
+    low=price_filtered['Low'],
+    close=price_filtered['Close']
 )])
+
+market_cap_cr = info.get('marketCap',0)/1e7
+
+fig.add_annotation(
+    text=f"Market Cap: ₹{market_cap_cr:,.0f} Cr",
+    xref="paper", yref="paper",
+    x=1, y=1.15, showarrow=False
+)
 
 fig.update_layout(title=f"{company} Price Chart", xaxis_rangeslider_visible=False)
 st.plotly_chart(fig, use_container_width=True)
 
-# ---------------- PERFORMANCE ----------------
-def CAGR(df):
-    return ((df['Close'].iloc[-1]/df['Close'].iloc[0])**(252/len(df))-1)*100
+# ---------------- FINANCIAL STATEMENTS (SHORT FORMAT) ----------------
+st.subheader("📑 Financial Statements (₹ in Crores)")
 
-col1, col2, col3, col4 = st.columns(4)
-
-col1.metric("Price", f"₹{price['Close'].iloc[-1]:.2f}")
-col2.metric("CAGR", f"{CAGR(price):.2f}%")
-col3.metric("52W High", f"₹{price['Close'].tail(252).max():.2f}")
-col4.metric("Market Cap", fmt(info.get('marketCap',0)))
-
-# ---------------- FINANCIAL STATEMENTS ----------------
-st.subheader("📑 Financial Statements (Absolute Values)")
-
-income_df = income.applymap(lambda x: f"{x:,.0f}" if pd.notnull(x) else "")
-balance_df = balance.applymap(lambda x: f"{x:,.0f}" if pd.notnull(x) else "")
-cashflow_df = cashflow.applymap(lambda x: f"{x:,.0f}" if pd.notnull(x) else "")
+income_df = income.applymap(lambda x: f"{x/1e7:,.2f}" if pd.notnull(x) else "")
+balance_df = balance.applymap(lambda x: f"{x/1e7:,.2f}" if pd.notnull(x) else "")
+cashflow_df = cashflow.applymap(lambda x: f"{x/1e7:,.2f}" if pd.notnull(x) else "")
 
 t1, t2, t3 = st.tabs(["Income Statement","Balance Sheet","Cash Flow"])
 
-with t1:
-    st.dataframe(income_df)
-with t2:
-    st.dataframe(balance_df)
-with t3:
-    st.dataframe(cashflow_df)
+with t1: st.dataframe(income_df)
+with t2: st.dataframe(balance_df)
+with t3: st.dataframe(cashflow_df)
 
-# ---------------- UPLOAD SCREENER FS (AUTO ANALYSIS) ----------------
-st.subheader("📂 Upload Financial Statement (from Screener)")
+# ---------------- PROPER RATIO CALCULATION ----------------
+def safe(v): return round(v,2) if v and not pd.isna(v) else 0
 
-uploaded = st.file_uploader("Upload CSV or Excel downloaded from Screener", type=["csv","xlsx"])
-
-if uploaded:
-    try:
-        if uploaded.name.endswith("csv"):
-            fs = pd.read_csv(uploaded)
-        else:
-            fs = pd.read_excel(uploaded)
-
-        st.success("File loaded successfully")
-        st.dataframe(fs)
-
-        numeric_cols = fs.select_dtypes(include=np.number)
-
-        if not numeric_cols.empty:
-            st.subheader("📊 Auto Financial Analysis")
-
-            total_revenue = numeric_cols.iloc[0].sum()
-            net_profit = numeric_cols.iloc[-1].sum()
-
-            profit_margin = (net_profit/total_revenue)*100 if total_revenue else 0
-
-            col1, col2, col3 = st.columns(3)
-            col1.metric("Total Revenue", f"₹{total_revenue:,.0f}")
-            col2.metric("Net Profit", f"₹{net_profit:,.0f}")
-            col3.metric("Profit Margin", f"{profit_margin:.2f}%")
-
-            st.plotly_chart(px.bar(numeric_cols.T, title="Financial Trend"), use_container_width=True)
-
-        else:
-            st.warning("No numeric financial data detected")
-
-    except Exception as e:
-        st.error("Unable to read file. Please upload Screener CSV/Excel format correctly.")
-
-# ---------------- ADVANCED RATIOS ----------------
-def safe(v): return round(v,2) if v else 0
+try:
+    ebit = income.loc['Ebit'].iloc[0]
+    total_assets = balance.loc['Total Assets'].iloc[0]
+    current_liabilities = balance.loc['Current Liabilities'].iloc[0]
+    roce = (ebit / (total_assets - current_liabilities)) * 100
+except:
+    roce = 0
 
 ratios = pd.DataFrame({
     "Ratio": [
@@ -151,7 +144,7 @@ ratios = pd.DataFrame({
         safe(info.get('trailingPE')),
         safe(info.get('priceToBook')),
         safe(info.get('returnOnEquity',0)*100),
-        safe(info.get('returnOnAssets',0)*100),
+        safe(roce),
         safe(info.get('profitMargins',0)*100),
         safe(info.get('debtToEquity')),
         safe(info.get('currentRatio')),
@@ -160,49 +153,41 @@ ratios = pd.DataFrame({
     ]
 })
 
-st.subheader("📊 Key Financial Ratios (Beginner Friendly)")
+st.subheader("📊 Financial Ratios")
 st.table(ratios)
 
-# ---------------- HEALTH SCORE ----------------
-score = 0
-if CAGR(price) > 12: score += 25
-if ratios.iloc[2,1] > 15: score += 25
-if ratios.iloc[5,1] < 1: score += 25
-if ratios.iloc[0,1] and ratios.iloc[0,1] < 25: score += 25
+# ---------------- RATIO SUMMARY ----------------
+summary = f"""
+{company} shows a PE of {ratios.iloc[0,1]}, indicating valuation level.
 
-st.subheader("📌 Stock Health Score")
-st.progress(score/100)
-st.write(f"{score}/100")
+ROE of {ratios.iloc[2,1]}% reflects shareholder return efficiency.
 
-# ---------------- SIMILAR STOCKS ----------------
-sector = info.get('sector','')
+ROCE of {ratios.iloc[3,1]}% measures business capital productivity.
 
-st.subheader("🏭 Similar Companies")
+Debt to Equity at {ratios.iloc[5,1]} indicates leverage risk.
 
-if sector:
-    peer_results = Search(sector, max_results=10).quotes
-    peers = [p.get('shortname') for p in peer_results if p.get('shortname')][:6]
-    st.write(", ".join(peers))
-else:
-    st.write("Sector information not available")
-
-# ---------------- MINI EDUCATION PANEL ----------------
-st.subheader("📘 Stock Insight for Beginners")
-
-article = f"""
-{company} currently shows a PE ratio of {ratios.iloc[0,1]}, which suggests the market's expectation of future growth.
-
-ROE at {ratios.iloc[2,1]}% indicates how efficiently the company uses shareholder money.
-
-Debt to Equity of {ratios.iloc[5,1]} shows financial risk level.
-
-Overall health score of {score}/100 suggests the stock is {'strong' if score>70 else 'average' if score>40 else 'risky'} for long-term investors.
+Overall, growth and profitability appear {'strong' if ratios.iloc[2,1]>15 else 'moderate' if ratios.iloc[2,1]>8 else 'weak'}.
 """
 
-st.info(article)
+st.info(summary)
 
-# ---------------- FORECAST ----------------
-reset = price.reset_index()
+# ---------------- STOCK NEWS (INDIAN SOURCES) ----------------
+st.subheader("📰 Latest Stock News")
+
+feeds = [
+    "https://indianexpress.com/section/business/feed/",
+    "https://timesofindia.indiatimes.com/rssfeeds/1898055.cms",
+    "https://www.indiatoday.in/rss/1206514"
+]
+
+for url in feeds:
+    feed = feedparser.parse(url)
+    for entry in feed.entries[:2]:
+        st.markdown(f"**{entry.title}**")
+        st.caption(entry.link)
+
+# ---------------- SIMPLE FORECAST ----------------
+reset = price_filtered.reset_index()
 reset['t'] = np.arange(len(reset))
 X = reset[['t']]
 y = reset['Close']
